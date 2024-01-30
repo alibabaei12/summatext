@@ -8,15 +8,19 @@
 #
 # if __name__ == '__main__':
 #     app.run(debug=True)
+from typing import Sequence
+
+from langchain.output_parsers import PydanticOutputParser
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.chat_models import ChatOpenAI
 from langchain_community.document_loaders import UnstructuredPDFLoader
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationChain
+from langchain.chains import create_extraction_chain
+from langchain_core.prompts import PromptTemplate
+from langchain_core.pydantic_v1 import BaseModel, Field, validator
 
 import re
 
-max_input_length = 4000
+max_input_length = 1000
 max_output_length = 1000
 
 def parse_pdf(pdf_path):
@@ -35,7 +39,7 @@ def find_table_of_contents():
     Implement your logic to find the table of contents from the parsed documents.
     This is a placeholder function. You need to write custom logic based on your PDF structure.
     """
-    toc = ""
+    toc = []
     elements = parse_pdf('/Users/alibabaei/Code/git/summatext/Designing Data-Intensive Applications.pdf')
     i = 1
     start_table_of_contents_index = 0
@@ -54,8 +58,10 @@ def find_table_of_contents():
             end_table_of_contents_index = i
             break
 
-    if end_table_of_contents_index == len(elements)-1:
-        print("couldn't find the end of TOC")
+        if i >= max_input_length:
+            print("toc not finished")
+            break
+
 
     for element in elements[start_table_of_contents_index:end_table_of_contents_index]:
         page_content = element.page_content
@@ -63,53 +69,48 @@ def find_table_of_contents():
         if "." in page_content:
             page_content = page_content.replace(".", "")
         page_content = re.sub(' +', ' ', page_content)
-        toc += page_content + "\n"
+        toc.append(page_content)
         word_count += len(page_content)
 
     # Custom logic to find the table of contents
+
     return toc
 
 
 
-if __name__ == "__main__":
-    # Define your schema
-    schema = {
-        "properties": {
-            "chapter_title": {"type": "string"},
-            "chapter_topics": {"type": "string"},
-            "chapter_sub_topics": {"type": "string"},
-            "page_number": {"type": "integer"}
-            # Add more fields as necessary
-        },
-        "required": ["chapter_title", "page_number"]
-    }
+class Chapter(BaseModel):
+    chapter_title: str
+    chapter_sub_title: list
 
-    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", max_tokens=max_output_length)
+class TOC(BaseModel):
+    """ Identify the chapter title and the subtitles under that chapter"""
+
+    toc: Sequence[Chapter]
+
+if __name__ == "__main__":
+
+    # Set up a parser + inject instructions into the prompt template.
+    parser = PydanticOutputParser(pydantic_object=TOC)
+
+
+    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", max_tokens=max_input_length)
     # chain = create_extraction_chain(schema, llm)
 
-    # Initialize ConversationBufferMemory
-    memory = ConversationBufferMemory()
-
-    # Initialize ConversationChain with the memory
-    conversation = ConversationChain(llm=llm, memory=memory, verbose=True)
-
     try:
-        input_text = find_table_of_contents()
-        print("Extracted TOC Text: ", input_text)
+        tocs = find_table_of_contents()
 
-        splitted_text = RecursiveCharacterTextSplitter(
-            chunk_size=500, chunk_overlap=100, separators=["\n\n", "\n", " ", ""]
-        ).split_text(input_text)
-          # Debug: Print the extracted text
-        print("Splitted Text: ", splitted_text)
+        for section in tocs[2:]:
+            print("Extracted TOC Text: ",section)
+            prompt = PromptTemplate(
+                template="Answer the user query.\n{format_instructions}\n{query}\nThe answer must be only {max_tokens} tokens\nIf the input doesnt makes sense, just ignore it",
+                input_variables=["query"],
+                partial_variables={"format_instructions": parser.get_format_instructions(), "max_tokens": max_output_length},
+            )
+            _input = prompt.format_prompt(query=section)
+            result = llm(_input.to_string())
+            parser.parse(result)
+            # results = chain.run(section)
 
-        for chunk in splitted_text:
-            prompt = "take in this chunk and dont return any response yet. MOST IMPORTANT ROLE IS DO NOT RESPOND ANYTHING\n\n" + chunk
-            response = conversation.predict(input=prompt)
-            print("Response: ", response)
-
-        final_prompt = "ok now Based on all the text processed, list all chapter titles and main points."
-        final_response = conversation.predict(input=final_prompt)
-        print("Final Response: ", final_response)
+            print(result)
     except Exception as e:
         print("Error occurred:", str(e))
